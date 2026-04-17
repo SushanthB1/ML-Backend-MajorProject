@@ -130,6 +130,11 @@ class AppState:
         self.file_name: str = ""
         self.total_rows: int = 0
         self.reasoning: str = ""
+        # New: stored after upload
+        self.statistics: Dict[str, Any] = {}
+        self.correlation: Dict[str, Any] = {}
+        # New: stored after train
+        self.hyperparameters: Dict[str, Dict[str, Any]] = {}
 
 
 state = AppState()
@@ -648,6 +653,64 @@ def make_mae_comparison_chart(comparison_results: Dict) -> io.BytesIO:
     return buf
 
 
+def make_correlation_heatmap(corr_matrix: Dict[str, Any]) -> io.BytesIO:
+    """Render a viridis correlation heatmap as a matplotlib figure."""
+    cols = list(corr_matrix.keys())
+    n = len(cols)
+    data = np.zeros((n, n))
+    for i, r in enumerate(cols):
+        for j, c in enumerate(cols):
+            v = corr_matrix.get(r, {}).get(c)
+            data[i, j] = v if v is not None else 0.0
+
+    fig_size = max(5, n * 0.9)
+    fig, ax = plt.subplots(figsize=(fig_size + 1.5, fig_size))
+
+    im = ax.imshow(data, cmap="viridis", vmin=-1, vmax=1, aspect="auto")
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    ax.set_xticks(range(n))
+    ax.set_yticks(range(n))
+    short = [c if len(c) <= 14 else c[:13] + "…" for c in cols]
+    ax.set_xticklabels(short, rotation=40, ha="right", fontsize=8.5)
+    ax.set_yticklabels(short, fontsize=8.5)
+
+    for i in range(n):
+        for j in range(n):
+            val = data[i, j]
+            txt = f"{val:.2f}" if abs(val) >= 0.001 else f"{val:.1e}"
+            text_color = (
+                "white" if abs(val) < 0.5 else ("black" if val > 0.65 else "white")
+            )
+            ax.text(
+                j,
+                i,
+                txt,
+                ha="center",
+                va="center",
+                fontsize=7.5,
+                color=text_color,
+                fontweight="bold",
+            )
+
+    ax.set_title(
+        "Correlation between different attributes",
+        fontsize=13,
+        fontweight="bold",
+        color="#1e293b",
+        pad=12,
+    )
+    ax.set_facecolor("#f8fafc")
+    fig.patch.set_facecolor("white")
+    plt.tight_layout()
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
 # ==========================================
 # PDF REPORT GENERATOR
 # ==========================================
@@ -971,6 +1034,125 @@ def generate_pdf_report() -> io.BytesIO:
 
     story.append(PageBreak())
 
+    # ── SECTION 1.5: STATISTICAL ANALYSIS ───────────────────────────────
+    if state.statistics:
+        story.append(
+            Paragraph("1.5  Statistical Analysis of Features", styles["section_h1"])
+        )
+        story.append(DIVIDER)
+        story.append(
+            Paragraph(
+                "Descriptive statistics for every numeric column in the uploaded dataset. "
+                "Missing values are flagged in red.",
+                styles["body"],
+            )
+        )
+        story.append(Spacer(1, 0.3 * cm))
+
+        stat_header = [
+            "Feature",
+            "Count",
+            "Missing",
+            "Mean",
+            "Std Dev",
+            "Min",
+            "Q25",
+            "Median",
+            "Q75",
+            "Max",
+        ]
+        stat_rows = [stat_header]
+        for col, s in state.statistics.items():
+
+            def _f(v, d=3):
+                if v is None or (
+                    isinstance(v, float) and (math.isnan(v) or math.isinf(v))
+                ):
+                    return "—"
+                return f"{v:.{d}f}"
+
+            missing_str = (
+                f"{s.get('missing', 0)} ({_f(s.get('missing_pct'), 1)}%)"
+                if s.get("missing", 0) > 0
+                else "0"
+            )
+            stat_rows.append(
+                [
+                    col[:20],
+                    str(s.get("count", "—")),
+                    missing_str,
+                    _f(s.get("mean")),
+                    _f(s.get("std")),
+                    _f(s.get("min")),
+                    _f(s.get("q25")),
+                    _f(s.get("median")),
+                    _f(s.get("q75")),
+                    _f(s.get("max")),
+                ]
+            )
+
+        n_cols = len(stat_header)
+        first_col_w = 3.2 * cm
+        rest_w = (PAGE_W - first_col_w) / (n_cols - 1)
+        col_widths = [first_col_w] + [rest_w] * (n_cols - 1)
+        st_table = Table(stat_rows, colWidths=col_widths, repeatRows=1)
+
+        # Build style; highlight missing cells red
+        st_style = [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e293b")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("ALIGN", (0, 0), (0, -1), "LEFT"),
+            ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            (
+                "ROWBACKGROUNDS",
+                (0, 1),
+                (-1, -1),
+                [colors.white, colors.HexColor("#f8fafc")],
+            ),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e2e8f0")),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ]
+        for row_i, (col, s) in enumerate(state.statistics.items(), start=1):
+            if s.get("missing", 0) > 0:
+                st_style.append(
+                    ("TEXTCOLOR", (2, row_i), (2, row_i), colors.HexColor("#ef4444"))
+                )
+                st_style.append(("FONTNAME", (2, row_i), (2, row_i), "Helvetica-Bold"))
+        st_table.setStyle(TableStyle(st_style))
+        story.append(st_table)
+        story.append(PageBreak())
+
+    # ── SECTION 1.6: CORRELATION MATRIX ─────────────────────────────────
+    if state.correlation and len(state.correlation) > 1:
+        story.append(Paragraph("1.6  Correlation Matrix", styles["section_h1"]))
+        story.append(DIVIDER)
+        story.append(
+            Paragraph(
+                "Pearson correlation coefficients between all numeric features. "
+                "Yellow = strong positive (+1), teal = neutral (0), purple = strong negative (−1).",
+                styles["body"],
+            )
+        )
+        story.append(Spacer(1, 0.3 * cm))
+        corr_buf = make_correlation_heatmap(state.correlation)
+        n_cols_corr = len(state.correlation)
+        chart_h = min(14, max(6, n_cols_corr * 1.1))
+        story.append(
+            _buf_to_rl_image(corr_buf, width_cm=PAGE_W / cm, height_cm=chart_h)
+        )
+        story.append(
+            Paragraph(
+                "Figure: Correlation heatmap — viridis colour scale.", styles["caption"]
+            )
+        )
+        story.append(PageBreak())
+
     # ── SECTION 2: PERFORMANCE METRICS SUMMARY ──────────────────────────
     story.append(Paragraph("2. Performance Metrics Summary", styles["section_h1"]))
     story.append(DIVIDER)
@@ -1145,6 +1327,64 @@ def generate_pdf_report() -> io.BytesIO:
         story.append(mini_t)
         story.append(Spacer(1, 0.35 * cm))
 
+        # Hyperparameters table for this model
+        hp = state.hyperparameters.get(model_name, {})
+        if hp:
+            story.append(Paragraph("Hyperparameters Used", styles["section_h2"]))
+            hp_items = [(k, str(v) if v is not None else "None") for k, v in hp.items()]
+            # Split into two side-by-side columns for space efficiency
+            mid = math.ceil(len(hp_items) / 2)
+            left_items = hp_items[:mid]
+            right_items = hp_items[mid:]
+
+            def _hp_sub_table(items):
+                rows = [["Parameter", "Value"]]
+                for k, v in items:
+                    rows.append([k, v])
+                sub = Table(rows, colWidths=[3.5 * cm, 3.5 * cm])
+                sub_style = [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#334155")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+                    ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    (
+                        "ROWBACKGROUNDS",
+                        (0, 1),
+                        (-1, -1),
+                        [colors.white, colors.HexColor("#f8fafc")],
+                    ),
+                    ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#e2e8f0")),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                ]
+                sub.setStyle(TableStyle(sub_style))
+                return sub
+
+            hp_outer = Table(
+                [
+                    [
+                        _hp_sub_table(left_items),
+                        _hp_sub_table(right_items) if right_items else "",
+                    ]
+                ],
+                colWidths=[PAGE_W / 2, PAGE_W / 2],
+            )
+            hp_outer.setStyle(
+                TableStyle(
+                    [
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                    ]
+                )
+            )
+            story.append(hp_outer)
+            story.append(Spacer(1, 0.3 * cm))
+
         # Scatter + SHAP side by side
         chart_data = state.chart_data_all.get(model_name, [])
         shap_data = state.shap_by_model.get(model_name, [])
@@ -1272,6 +1512,8 @@ async def upload_file(file: UploadFile = File(...)):
         state.trained_model_names = []
         state.file_name = file.filename
         state.total_rows = len(df)
+        state.statistics = statistics
+        state.correlation = corr_matrix
 
         preview = df.head(10).replace({np.nan: None}).to_dict(orient="records")
 
@@ -1569,6 +1811,7 @@ async def train_model(req: TrainRequest):
         }
         state.pysr_equation = pysr_equation
         state.reasoning = reasoning
+        state.hyperparameters = model_hyperparams
 
         # ── Extract hyperparameters for each successfully trained model ──
         model_hyperparams: Dict[str, Dict[str, Any]] = {}
