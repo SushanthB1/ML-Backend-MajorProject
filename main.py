@@ -1512,8 +1512,7 @@ async def upload_file(file: UploadFile = File(...)):
         state.trained_model_names = []
         state.file_name = file.filename
         state.total_rows = len(df)
-        state.statistics = statistics
-        state.correlation = corr_matrix
+        
 
         preview = df.head(10).replace({np.nan: None}).to_dict(orient="records")
 
@@ -1543,6 +1542,9 @@ async def upload_file(file: UploadFile = File(...)):
                 corr_matrix[col] = {
                     col2: safe_float(corr_df.loc[col, col2]) for col2 in numeric_cols
                 }
+        
+        state.statistics = statistics
+        state.correlation = corr_matrix
 
         response = {
             "columns": list(df.columns),
@@ -1811,7 +1813,7 @@ async def train_model(req: TrainRequest):
         }
         state.pysr_equation = pysr_equation
         state.reasoning = reasoning
-        state.hyperparameters = model_hyperparams
+        
 
         # ── Extract hyperparameters for each successfully trained model ──
         model_hyperparams: Dict[str, Dict[str, Any]] = {}
@@ -1841,7 +1843,9 @@ async def train_model(req: TrainRequest):
                     model_hyperparams[name] = {}
             except Exception:
                 model_hyperparams[name] = {}
-
+        
+        state.hyperparameters = model_hyperparams
+        
         response: Dict[str, Any] = {
             "comparison": comparison_results,
             "best_model": best_model,
