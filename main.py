@@ -1275,11 +1275,40 @@ async def upload_file(file: UploadFile = File(...)):
 
         preview = df.head(10).replace({np.nan: None}).to_dict(orient="records")
 
+        # ── Statistical analysis per numeric column ─────────────────────
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        statistics: Dict[str, Any] = {}
+        for col in numeric_cols:
+            col_data = df[col].dropna()
+            statistics[col] = {
+                "count": int(col_data.count()),
+                "mean": safe_float(col_data.mean()),
+                "std": safe_float(col_data.std()),
+                "min": safe_float(col_data.min()),
+                "q25": safe_float(col_data.quantile(0.25)),
+                "median": safe_float(col_data.median()),
+                "q75": safe_float(col_data.quantile(0.75)),
+                "max": safe_float(col_data.max()),
+                "missing": int(df[col].isna().sum()),
+                "missing_pct": safe_float(df[col].isna().sum() / len(df) * 100),
+            }
+
+        # ── Correlation matrix (numeric columns only) ───────────────────
+        corr_matrix: Dict[str, Dict[str, Optional[float]]] = {}
+        if len(numeric_cols) > 1:
+            corr_df = df[numeric_cols].corr()
+            for col in numeric_cols:
+                corr_matrix[col] = {
+                    col2: safe_float(corr_df.loc[col, col2]) for col2 in numeric_cols
+                }
+
         response = {
             "columns": list(df.columns),
             "preview": preview,
             "total_rows": len(df),
             "active_sheet": sheet_names[0] if sheet_names else None,
+            "statistics": statistics,
+            "correlation": corr_matrix,
         }
         if len(sheet_names) > 1:
             response["all_sheets"] = sheet_names
@@ -1541,6 +1570,32 @@ async def train_model(req: TrainRequest):
         state.pysr_equation = pysr_equation
         state.reasoning = reasoning
 
+        # ── Extract hyperparameters for each successfully trained model ──
+        model_hyperparams: Dict[str, Dict[str, Any]] = {}
+        for name in comparison_results.keys():
+            model = state.models.get(name)
+            if model is None:
+                continue
+            try:
+                src = (
+                    model.model
+                    if (hasattr(model, "model") and not hasattr(model, "get_params"))
+                    else model
+                )
+                if hasattr(src, "get_params"):
+                    raw = src.get_params()
+                    clean: Dict[str, Any] = {}
+                    for k, v in raw.items():
+                        if isinstance(v, (int, float, str, bool, type(None))):
+                            clean[k] = v
+                        else:
+                            clean[k] = str(v)
+                    model_hyperparams[name] = clean
+                else:
+                    model_hyperparams[name] = {}
+            except Exception:
+                model_hyperparams[name] = {}
+
         response: Dict[str, Any] = {
             "comparison": comparison_results,
             "best_model": best_model,
@@ -1556,6 +1611,7 @@ async def train_model(req: TrainRequest):
                 "test_size": test_size_actual,
                 "test_ratio": req.test_size,
             },
+            "hyperparameters": model_hyperparams,
         }
         if training_errors:
             response["training_warnings"] = training_errors
