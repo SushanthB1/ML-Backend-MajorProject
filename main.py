@@ -1586,7 +1586,10 @@ async def train_model(req: TrainRequest):
                     raw = src.get_params()
                     clean: Dict[str, Any] = {}
                     for k, v in raw.items():
-                        if isinstance(v, (int, float, str, bool, type(None))):
+                        if isinstance(v, float):
+                            # nan/inf are not JSON-serialisable — convert to None
+                            clean[k] = safe_float(v)
+                        elif isinstance(v, (int, str, bool, type(None))):
                             clean[k] = v
                         else:
                             clean[k] = str(v)
